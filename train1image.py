@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pydicom
 import cv2 as cv
+import kornia.morphology as mm
 
 
 def minmaxscaler(data):
@@ -31,11 +32,16 @@ def read_dcm(path):
     img = (img * 255).astype(np.uint8)
     mov = img[2]
     #ref = img[40]
-    ref = img[10]
+    ref = img[12]
 
+    #Canny
+    '''
+    refedge = transform(cv.Canny(ref, 40, 60))
+    movedge = transform(cv.Canny(mov, 40, 60))
+    refedge = torch.unsqueeze(refedge, 0)
+    movedge = torch.unsqueeze(movedge, 0)   
+    '''
 
-    #refedge = cv.Canny(ref, 40, 60)
-    #movedge = cv.Canny(mov, 40, 60)
 
     '''
     plt.subplot(121), plt.imshow(ref, cmap='gray')
@@ -47,35 +53,52 @@ def read_dcm(path):
 
     ref = transform(ref)
     mov = transform(mov)
-    #refedge = transform(refedge)
-    #movedge = transform(movedge)
+
     ref = torch.unsqueeze(ref, 0)
     mov = torch.unsqueeze(mov, 0)
-    #refedge = torch.unsqueeze(refedge, 0)
-    #movedge = torch.unsqueeze(movedge, 0)
 
+    #morphology
     #gauss_ker = torch.tensor([[[[1/16, 1/8, 1/16], [1/8, 1/4, 1/8], [1/16, 1/8, 1/16]]]], dtype=torch.float32)
     gauss_ker = torch.tensor([[[[1, 4, 7, 4, 1], [4, 16, 26, 16, 4], [7, 26, 41, 26, 7], [4, 16, 26, 16, 4], [1, 4, 7, 4, 1]]]], dtype=torch.float32) / 273
     #lap_ker = torch.tensor([[[[-1, -1, -1], [-1, 4, -1], [0, -1, 0]]]], dtype=torch.float32)
     lap_ker = torch.tensor([[[[0, 0, -1, 0, 0], [0, -1, -2, -1, 0], [-1, -2, 16, -2, -1], [0, -1, -2, -1, 0], [0, 0, -1, 0, 0]]]], dtype=torch.float32)
     # lap_ker = lap_ker.repeat(1, 1, 1, 1)
+    refedge = F.conv2d(ref, gauss_ker, padding=0, groups=1)
+    movedge = F.conv2d(mov, gauss_ker, padding=0, groups=1)
 
+    kernel = torch.zeros(3, 3)
+    M = mm.opening(mm.closing(mov, kernel), kernel)
+    movedge = mm.dilation(mm.closing(M, kernel), kernel) - mm.closing(M, kernel)
+    movedge = minmaxscaler(movedge)
+    M = mm.opening(mm.closing(ref, kernel), kernel)
+    refedge = mm.dilation(mm.closing(M, kernel), kernel) - mm.closing(M, kernel)
+    refedge = minmaxscaler(refedge)    
+
+
+
+    #Laplacian
+    '''
+    #gauss_ker = torch.tensor([[[[1/16, 1/8, 1/16], [1/8, 1/4, 1/8], [1/16, 1/8, 1/16]]]], dtype=torch.float32)
+    gauss_ker = torch.tensor([[[[1, 4, 7, 4, 1], [4, 16, 26, 16, 4], [7, 26, 41, 26, 7], [4, 16, 26, 16, 4], [1, 4, 7, 4, 1]]]], dtype=torch.float32) / 273
+    #lap_ker = torch.tensor([[[[-1, -1, -1], [-1, 4, -1], [0, -1, 0]]]], dtype=torch.float32)
+    lap_ker = torch.tensor([[[[0, 0, -1, 0, 0], [0, -1, -2, -1, 0], [-1, -2, 16, -2, -1], [0, -1, -2, -1, 0], [0, 0, -1, 0, 0]]]], dtype=torch.float32)
+    # lap_ker = lap_ker.repeat(1, 1, 1, 1)
     refedge = F.conv2d(ref, gauss_ker, padding=0, groups=1)
     movedge = F.conv2d(mov, gauss_ker, padding=0, groups=1)
     refedge = F.conv2d(refedge, lap_ker, padding=0, groups=1).abs()
     movedge = F.conv2d(movedge, lap_ker, padding=0, groups=1).abs()
     refedge = minmaxscaler(refedge)
-    movedge = minmaxscaler(movedge)
-    #plt.imshow(refedge.squeeze(0).permute(1, 2, 0).numpy().astype(np.float32), cmap='gray')
-    #plt.show()
+    movedge = minmaxscaler(movedge)    
+    '''
+
 
     return ref, mov, refedge, movedge
 
 
 epochs = 500
 lr = 0.0001
-c = 2
-lambd = 0.001
+c = 4
+lambd = 0.01
 img_ch = 1
 mod_epoch = 10
 save_folder = './save'
@@ -99,12 +122,14 @@ ref = U.to_cuda(ref)
 mov = U.to_cuda(mov)
 refedge = U.to_cuda(refedge)
 movedge = U.to_cuda(movedge)
-#subedge = U.to_cuda(subedge)
 ref = transforms.CenterCrop(724)(ref)
 mov = transforms.CenterCrop(724)(mov)
 refedge = transforms.CenterCrop(724)(refedge)
 movedge = transforms.CenterCrop(724)(movedge)
 
+#plt.subplot(121), plt.imshow(movedge.squeeze().cpu().numpy(), cmap='gray')
+#plt.subplot(122), plt.imshow(refedge.squeeze().cpu().numpy(), cmap='gray')
+#plt.show()
 
 mode = '12'
 
@@ -116,7 +141,7 @@ if mode == '1':
         movededge, _ = smoothTransformer2D(movedge, deformable, c)
 
         ref_loss = torch.sum(((movededge - refedge) * (1.0 - refedge)) ** 2)
-        mov_loss = torch.sum(((moved - ref) * refedge) ** 2)
+        mov_loss = torch.sum(((moved - ref) * (refedge) ) ** 2)
         mse_loss = ref_loss + mov_loss
         #mse_loss = mov_loss
         def_loss = lambd * torch.sum(torch.abs(deformable))
@@ -128,6 +153,8 @@ if mode == '1':
         if (epoch+1) % mod_epoch == 0:
             print(f"Epoch: {epoch+1}/{epochs} Loss: {loss}")
     torch.save(model.state_dict(), f"{save_folder}/model_{epochs}.pt")
+
+
 elif mode == '12':
     model_root = os.path.join(save_folder, f"model_{epochs}.pt")
     model.load_state_dict(torch.load(model_root))
